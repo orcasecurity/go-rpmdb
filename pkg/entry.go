@@ -120,6 +120,9 @@ func hdrblobInit(data []byte) (*hdrblob, error) {
 	if blob.il < 1 {
 		return nil, xerrors.New("region no tags error")
 	}
+	if blob.pvlen >= headerMaxbytes {
+		return nil, xerrors.Errorf("blob size(%d) BAD, 8 + 16 * il(%d) + dl(%d)", blob.pvlen, blob.il, blob.dl)
+	}
 
 	blob.peList = make([]entryInfo, blob.il)
 	for i := 0; i < int(blob.il); i++ {
@@ -131,9 +134,6 @@ func hdrblobInit(data []byte) (*hdrblob, error) {
 			return nil, xerrors.Errorf("failed to read entry info: %w", err)
 		}
 		blob.peList[i] = pe
-	}
-	if blob.pvlen >= headerMaxbytes {
-		return nil, xerrors.Errorf("blob size(%d) BAD, 8 + 16 * il(%d) + dl(%d)", blob.pvlen, blob.il, blob.dl)
 	}
 
 	if err := hdrblobVerifyRegion(&blob, data); err != nil {
@@ -167,6 +167,9 @@ func hdrblobImport(blob hdrblob, data []byte) ([]indexEntry, error) {
 		}
 
 		// ref. https://github.com/rpm-software-management/rpm/blob/rpm-4.14.3-release/lib/header.c#L917
+		if ril < 1 || int(ril) > len(blob.peList) {
+			return nil, xerrors.Errorf("invalid region index length: %d", ril)
+		}
 		indexEntries, rdlen, err = regionSwab(data, blob.peList[1:ril], 0, blob.dataStart, blob.dataEnd)
 		if err != nil {
 			return nil, xerrors.Errorf("failed to parse region entries: %w", err)
@@ -410,10 +413,14 @@ func strtaglen(data []byte, count uint32, start, dataEnd int32) int {
 
 	for c := count; c > 0; c-- {
 		offset := start + int32(length)
-		if offset > int32(len(data)) {
+		if offset >= dataEnd || offset > int32(len(data)) {
 			return -1
 		}
-		length += bytes.IndexByte(data[offset:dataEnd], byte(0x00)) + 1
+		idx := bytes.IndexByte(data[offset:dataEnd], byte(0x00))
+		if idx < 0 {
+			return -1
+		}
+		length += idx + 1
 	}
 	return length
 }

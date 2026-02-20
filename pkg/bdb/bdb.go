@@ -20,7 +20,7 @@ var validPageSizes = map[uint32]struct{}{
 }
 
 type BerkeleyDB struct {
-	file         *os.File
+	reader       io.ReadSeeker
 	HashMetadata *HashMetadataPage
 }
 
@@ -30,14 +30,23 @@ func Open(path string) (*BerkeleyDB, error) {
 		return nil, err
 	}
 
+	db, err := NewReader(file)
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func NewReader(r io.ReadSeeker) (*BerkeleyDB, error) {
 	// read just a bit in to parse at least the metadata...
 	metadataBuff := make([]byte, 512)
-	_, err = file.Read(metadataBuff)
+	_, err := r.Read(metadataBuff)
 	if err != nil {
 		return nil, xerrors.Errorf("failed to read metadata: %w", err)
 	}
 
-	_, err = file.Seek(0, io.SeekStart)
+	_, err = r.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, xerrors.Errorf("failed to seek db file: %w", err)
 	}
@@ -51,14 +60,31 @@ func Open(path string) (*BerkeleyDB, error) {
 		return nil, xerrors.Errorf("unexpected page size: %+v", hashMetadata.PageSize)
 	}
 
+	// Validate LastPageNo against the actual reader size to prevent
+	// excessive iteration on corrupted metadata.
+	size, err := r.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to determine reader size: %w", err)
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, xerrors.Errorf("failed to seek db file: %w", err)
+	}
+	maxPages := uint32(size / int64(hashMetadata.PageSize))
+	if hashMetadata.LastPageNo > maxPages {
+		return nil, xerrors.Errorf("LastPageNo %d exceeds data size (%d pages)", hashMetadata.LastPageNo, maxPages)
+	}
+
 	return &BerkeleyDB{
-		file:         file,
+		reader:       r,
 		HashMetadata: hashMetadata,
 	}, nil
 }
 
 func (db *BerkeleyDB) Close() error {
-	return db.file.Close()
+	if closer, ok := db.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (db *BerkeleyDB) Read() <-chan dbi.Entry {
@@ -68,16 +94,14 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 		defer close(entries)
 
 		for pageNum := uint32(0); pageNum <= db.HashMetadata.LastPageNo; pageNum++ {
-			pageData, err := slice(db.file, int(db.HashMetadata.PageSize))
+			pageData, err := slice(db.reader, int(db.HashMetadata.PageSize))
 			if err != nil {
-				entries <- dbi.Entry{
-					Err: err,
-				}
-				return
+				// truncated last page is expected at the end of some databases
+				break
 			}
 
 			// keep track of the start of the next page for the next iteration...
-			endOfPageOffset, err := db.file.Seek(0, io.SeekCurrent)
+			endOfPageOffset, err := db.reader.Seek(0, io.SeekCurrent)
 			if err != nil {
 				entries <- dbi.Entry{
 					Err: err,
@@ -101,13 +125,16 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 
 			hashPageIndexes, err := HashPageValueIndexes(pageData, hashPageHeader.NumEntries, db.HashMetadata.Swapped)
 			if err != nil {
-				entries <- dbi.Entry{
-					Err: err,
-				}
-				return
+				// skip pages with invalid index entries
+				continue
 			}
 
 			for _, hashPageIndex := range hashPageIndexes {
+				if int(hashPageIndex) >= len(pageData) {
+					// skip entries with out-of-range indexes
+					continue
+				}
+
 				// the first byte is the page type, so we can peek at it first before parsing further...
 				valuePageType := pageData[hashPageIndex]
 
@@ -116,9 +143,14 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 					continue
 				}
 
+				if int(hashPageIndex)+HashOffPageSize > len(pageData) {
+					// skip entries that extend past the page boundary
+					continue
+				}
+
 				// Traverse the page to concatenate the data that may span multiple pages.
 				valueContent, err := HashPageValueContent(
-					db.file,
+					db.reader,
 					pageData,
 					hashPageIndex,
 					db.HashMetadata.PageSize,
@@ -136,7 +168,7 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 			}
 
 			// go back to the start of the next page for reading...
-			_, err = db.file.Seek(endOfPageOffset, io.SeekStart)
+			_, err = db.reader.Seek(endOfPageOffset, io.SeekStart)
 			if err != nil {
 				entries <- dbi.Entry{
 					Err: err,

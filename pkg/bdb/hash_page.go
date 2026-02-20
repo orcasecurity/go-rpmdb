@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
-	"os"
 
 	"golang.org/x/xerrors"
 )
@@ -31,7 +30,7 @@ func ParseHashPage(data []byte, swapped bool) (*HashPage, error) {
 	return &hashPage, nil
 }
 
-func HashPageValueContent(db *os.File, pageData []byte, hashPageIndex uint16, pageSize uint32, swapped bool) ([]byte, error) {
+func HashPageValueContent(db io.ReadSeeker, pageData []byte, hashPageIndex uint16, pageSize uint32, swapped bool) ([]byte, error) {
 	// the first byte is the page type, so we can peek at it first before parsing further...
 	valuePageType := pageData[hashPageIndex]
 
@@ -48,8 +47,14 @@ func HashPageValueContent(db *os.File, pageData []byte, hashPageIndex uint16, pa
 	}
 
 	var hashValue []byte
+	visited := make(map[uint32]struct{})
 
 	for currentPageNo := entry.PageNo; currentPageNo != 0; {
+		if _, ok := visited[currentPageNo]; ok {
+			return nil, xerrors.Errorf("page cycle detected at page=%d", currentPageNo)
+		}
+		visited[currentPageNo] = struct{}{}
+
 		pageStart := pageSize * currentPageNo
 
 		_, err := db.Seek(int64(pageStart), io.SeekStart)
@@ -67,20 +72,17 @@ func HashPageValueContent(db *os.File, pageData []byte, hashPageIndex uint16, pa
 			return nil, xerrors.Errorf("failed to parse page=%d: %w", currentPageNo, err)
 		}
 		if currentPage.PageType != OverflowPageType {
-			continue
+			break
 		}
-
-		var hashValueBytes []byte
-		if currentPage.NextPageNo == 0 {
-			// this is the last page, the whole page contains content
-			hashValueBytes = currentPageBuff[PageHeaderSize : PageHeaderSize+currentPage.FreeAreaOffset]
-		} else {
-			hashValueBytes = currentPageBuff[PageHeaderSize:]
-		}
-
-		hashValue = append(hashValue, hashValueBytes...)
 
 		currentPageNo = currentPage.NextPageNo
+
+		if currentPageNo == 0 {
+			// this is the last page, the whole page contains content
+			hashValue = append(hashValue, currentPageBuff[PageHeaderSize:PageHeaderSize+currentPage.FreeAreaOffset]...)
+		} else {
+			hashValue = append(hashValue, currentPageBuff[PageHeaderSize:]...)
+		}
 	}
 
 	return hashValue, nil
@@ -94,7 +96,10 @@ func HashPageValueIndexes(data []byte, entries uint16, swapped bool) ([]uint16, 
 	}
 
 	// Every entry is a 2-byte offset that points somewhere in the current database page.
-	hashIndexSize := entries * HashIndexEntrySize
+	hashIndexSize := uint32(entries) * HashIndexEntrySize
+	if PageHeaderSize+hashIndexSize > uint32(len(data)) {
+		return nil, xerrors.Errorf("hash index size %d exceeds page data length %d", hashIndexSize, len(data)-PageHeaderSize)
+	}
 	hashIndexData := data[PageHeaderSize : PageHeaderSize+hashIndexSize]
 
 	// data is stored in key-value pairs (https://github.com/berkeleydb/libdb/blob/5b7b02ae052442626af54c176335b67ecc613a30/src/dbinc/db_page.h#L591)

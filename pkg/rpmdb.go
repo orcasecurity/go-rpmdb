@@ -67,14 +67,19 @@ func (d *RpmDB) ListPackages() ([]*PackageInfo, error) {
 		if entry.Err != nil {
 			return nil, entry.Err
 		}
+		if len(entry.Value) == 0 {
+			continue
+		}
 
 		indexEntries, err := headerImport(entry.Value)
 		if err != nil {
-			return nil, xerrors.Errorf("error during importing header: %w", err)
+			// skip entries with unparseable headers (e.g. freed/corrupted BDB pages)
+			continue
 		}
 		pkg, err := getNEVRA(indexEntries)
 		if err != nil {
-			return nil, xerrors.Errorf("invalid package info: %w", err)
+			// skip entries with invalid package metadata
+			continue
 		}
 		pkgList = append(pkgList, pkg)
 	}
