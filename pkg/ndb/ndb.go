@@ -188,6 +188,15 @@ func (db *RpmNDB) Read() <-chan dbi.Entry {
 			}
 			// ### check that BlkCnt == (BLOBHEAD_SIZE + bloblen + BLOBTAIL_SIZE + PKGDB_BLK_SIZE - 1) / PKGDB_BLK_SIZE)
 
+			// Sanity check against excessive memory usage from corrupted blob length
+			const maxBlobLen = 256 * 1024 * 1024
+			if blobHeaderBuff.BlobLen > maxBlobLen {
+				entries <- dbi.Entry{
+					Err: xerrors.Errorf("blob length %d exceeds limit for pkg %d", blobHeaderBuff.BlobLen, slot.PkgIndex),
+				}
+				return
+			}
+
 			// Read Blob Content
 			BlobEntry := make([]byte, blobHeaderBuff.BlobLen)
 			_, err = db.file.Read(BlobEntry)

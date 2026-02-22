@@ -113,13 +113,22 @@ func hdrblobInit(data []byte) (*hdrblob, error) {
 	if err = binary.Read(reader, binary.BigEndian, &blob.dl); err != nil {
 		return nil, xerrors.Errorf("invalid data length: %w", err)
 	}
+	if blob.il < 1 {
+		return nil, xerrors.New("region no tags error")
+	}
+	// Each index entry occupies sizeof(entryInfo) bytes in the input
+	// (after the 8-byte il+dl header). Reject il values that exceed what
+	// the data can hold; this also prevents integer overflow in the
+	// il*sizeof(entryInfo) multiplication below.
+	maxIL := int32(len(data)-8) / int32(unsafe.Sizeof(entryInfo{}))
+	if blob.il > maxIL {
+		return nil, xerrors.Errorf("il(%d) too large for data length %d", blob.il, len(data))
+	}
+
 	blob.dataStart = int32(unsafe.Sizeof(blob.il)) + int32(unsafe.Sizeof(blob.dl)) + blob.il*int32(unsafe.Sizeof(entryInfo{}))
 	blob.pvlen = int32(unsafe.Sizeof(blob.il)) + int32(unsafe.Sizeof(blob.dl)) + blob.il*int32(unsafe.Sizeof(entryInfo{})) + blob.dl
 	blob.dataEnd = blob.dataStart + blob.dl
 
-	if blob.il < 1 {
-		return nil, xerrors.New("region no tags error")
-	}
 	if blob.pvlen >= headerMaxbytes {
 		return nil, xerrors.Errorf("blob size(%d) BAD, 8 + 16 * il(%d) + dl(%d)", blob.pvlen, blob.il, blob.dl)
 	}

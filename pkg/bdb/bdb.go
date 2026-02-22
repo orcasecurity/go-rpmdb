@@ -93,6 +93,10 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 	go func() {
 		defer close(entries)
 
+		// Track overflow pages visited across all chains to prevent
+		// O(N^2) re-traversal of the same pages from different hash entries.
+		overflowVisited := make(map[uint32]struct{})
+
 		for pageNum := uint32(0); pageNum <= db.HashMetadata.LastPageNo; pageNum++ {
 			pageData, err := slice(db.reader, int(db.HashMetadata.PageSize))
 			if err != nil {
@@ -155,6 +159,7 @@ func (db *BerkeleyDB) Read() <-chan dbi.Entry {
 					hashPageIndex,
 					db.HashMetadata.PageSize,
 					db.HashMetadata.Swapped,
+					overflowVisited,
 				)
 
 				entries <- dbi.Entry{

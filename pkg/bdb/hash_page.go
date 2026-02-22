@@ -30,7 +30,7 @@ func ParseHashPage(data []byte, swapped bool) (*HashPage, error) {
 	return &hashPage, nil
 }
 
-func HashPageValueContent(db io.ReadSeeker, pageData []byte, hashPageIndex uint16, pageSize uint32, swapped bool) ([]byte, error) {
+func HashPageValueContent(db io.ReadSeeker, pageData []byte, hashPageIndex uint16, pageSize uint32, swapped bool, visited map[uint32]struct{}) ([]byte, error) {
 	// the first byte is the page type, so we can peek at it first before parsing further...
 	valuePageType := pageData[hashPageIndex]
 
@@ -47,17 +47,17 @@ func HashPageValueContent(db io.ReadSeeker, pageData []byte, hashPageIndex uint1
 	}
 
 	var hashValue []byte
-	visited := make(map[uint32]struct{})
 
 	for currentPageNo := entry.PageNo; currentPageNo != 0; {
 		if _, ok := visited[currentPageNo]; ok {
-			return nil, xerrors.Errorf("page cycle detected at page=%d", currentPageNo)
+			// Page already visited (cycle or shared by another chain)
+			break
 		}
 		visited[currentPageNo] = struct{}{}
 
-		pageStart := pageSize * currentPageNo
+		pageStart := int64(pageSize) * int64(currentPageNo)
 
-		_, err := db.Seek(int64(pageStart), io.SeekStart)
+		_, err := db.Seek(pageStart, io.SeekStart)
 		if err != nil {
 			return nil, xerrors.Errorf("failed to seek to HashPageValueContent (page=%d): %w", currentPageNo, err)
 		}
@@ -79,7 +79,11 @@ func HashPageValueContent(db io.ReadSeeker, pageData []byte, hashPageIndex uint1
 
 		if currentPageNo == 0 {
 			// this is the last page, the whole page contains content
-			hashValue = append(hashValue, currentPageBuff[PageHeaderSize:PageHeaderSize+currentPage.FreeAreaOffset]...)
+			end := uint32(PageHeaderSize) + uint32(currentPage.FreeAreaOffset)
+			if end > pageSize {
+				end = pageSize
+			}
+			hashValue = append(hashValue, currentPageBuff[PageHeaderSize:end]...)
 		} else {
 			hashValue = append(hashValue, currentPageBuff[PageHeaderSize:]...)
 		}
